@@ -4,6 +4,9 @@ import asyncio
 import httpx
 import json
 
+from datetime import datetime, timezone
+from urllib.parse import urlparse
+
 from a2a.client import (
     A2ACardResolver,
     ClientConfig,
@@ -23,65 +26,287 @@ from a2a.types import (
 # =====================================================
 
 st.set_page_config(
-    page_title="PragyanAI A2A Client",
+    page_title="PragyanAI - A2A Remote Agent Client",
     page_icon="🚀",
     layout="wide",
-)
-
-st.title("🚀 PragyanAI – A2A Remote Agent Client")
-
-st.caption(
-    "Discover a remote agent, send messages and "
-    "receive responses using the A2A protocol."
+    initial_sidebar_state="expanded",
 )
 
 
 # =====================================================
-# 2. SERVER CONFIGURATION
+# 2. CUSTOM CSS
 # =====================================================
+
+st.markdown("""
+<style>
+
+.main-title {
+    font-size: 32px;
+    font-weight: 700;
+    color: #2563EB;
+}
+
+.subtitle {
+    font-size: 15px;
+    color: gray;
+}
+
+.status-online {
+    color: #16A34A;
+    font-weight: bold;
+}
+
+.status-offline {
+    color: #DC2626;
+    font-weight: bold;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+
+# =====================================================
+# 3. HEADER
+# =====================================================
+
+st.markdown(
+    '<div class="main-title">🚀 A2A Remote Agent Client</div>',
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    '<div class="subtitle">'
+    'PragyanAI | Agent-to-Agent Communication | '
+    'Remote Agent Discovery and Messaging'
+    '</div>',
+    unsafe_allow_html=True,
+)
+
+st.divider()
+
+
+# =====================================================
+# 4. SERVER CONFIGURATION
+# =====================================================
+
+DEFAULT_URL = "https://your-a2a-server.onrender.com"
 
 try:
 
-    SERVER_URL = (
-        st.secrets["A2A_SERVER_URL"]
-        .strip()
-        .rstrip("/")
-    )
+    SECRET_URL = st.secrets["A2A_SERVER_URL"]
 
 except Exception:
 
-    st.error(
-        "A2A_SERVER_URL is missing from Streamlit Secrets."
-    )
-
-    st.stop()
+    SECRET_URL = DEFAULT_URL
 
 
-HEALTH_URL = f"{SERVER_URL}/health"
-AGENT_CARD_URL = (
-    f"{SERVER_URL}/.well-known/agent-card.json"
-)
+if "server_url" not in st.session_state:
 
+    st.session_state.server_url = SECRET_URL
 
-# =====================================================
-# 3. SESSION STATE
-# =====================================================
 
 if "agent_card" not in st.session_state:
+
     st.session_state.agent_card = None
 
+
 if "conversation" not in st.session_state:
+
     st.session_state.conversation = []
 
-if "agent_discovered" not in st.session_state:
-    st.session_state.agent_discovered = False
+
+if "last_health" not in st.session_state:
+
+    st.session_state.last_health = None
+
+
+if "last_response" not in st.session_state:
+
+    st.session_state.last_response = None
 
 
 # =====================================================
-# 4. HEALTH CHECK
+# 5. SIDEBAR CONFIGURATION
 # =====================================================
 
-async def check_server_health():
+with st.sidebar:
+
+    st.header("⚙️ A2A Configuration")
+
+    SERVER_URL = st.text_input(
+        "A2A Server URL",
+        value=st.session_state.server_url,
+        help="Enter your public Render server URL.",
+    ).strip().rstrip("/")
+
+    st.session_state.server_url = SERVER_URL
+
+    st.divider()
+
+    st.markdown("### Server Endpoints")
+
+    st.caption("Health")
+
+    st.code(
+        SERVER_URL + "/health"
+        if SERVER_URL else "Not configured"
+    )
+
+    st.caption("Agent Card")
+
+    st.code(
+        SERVER_URL + "/.well-known/agent-card.json"
+        if SERVER_URL else "Not configured"
+    )
+
+    st.caption("JSON-RPC")
+
+    st.code("/")
+
+    st.divider()
+
+    if st.button(
+        "🔄 Clear Conversation",
+        use_container_width=True,
+    ):
+
+        st.session_state.conversation = []
+
+        st.session_state.last_response = None
+
+        st.rerun()
+
+    if st.button(
+        "🔄 Reset Agent",
+        use_container_width=True,
+    ):
+
+        st.session_state.agent_card = None
+
+        st.session_state.last_health = None
+
+        st.rerun()
+
+    st.divider()
+
+    st.markdown("### Technology Stack")
+
+    st.markdown("""
+    - Python
+    - Streamlit
+    - A2A Python SDK
+    - HTTPX
+    - JSON-RPC 2.0
+    - Starlette
+    - Render Cloud
+    """)
+
+
+# =====================================================
+# 6. GENERIC OBJECT CONVERSION
+# =====================================================
+
+def safe_value(obj, field, default=None):
+
+    """
+    Safely read a field from either a dictionary
+    or an SDK object.
+    """
+
+    if obj is None:
+        return default
+
+    if isinstance(obj, dict):
+
+        return obj.get(field, default)
+
+    return getattr(obj, field, default)
+
+
+def to_plain_data(obj):
+
+    """
+    Convert SDK objects to JSON-compatible values.
+
+    Supports dictionaries, Pydantic objects,
+    dataclasses and ordinary Python objects.
+    """
+
+    if obj is None:
+        return None
+
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+
+    if isinstance(obj, dict):
+
+        return {
+            str(key): to_plain_data(value)
+            for key, value in obj.items()
+        }
+
+    if isinstance(obj, (list, tuple)):
+
+        return [
+            to_plain_data(item)
+            for item in obj
+        ]
+
+    if hasattr(obj, "model_dump"):
+
+        return to_plain_data(
+            obj.model_dump(
+                mode="json",
+                exclude_none=True,
+            )
+        )
+
+    if hasattr(obj, "dict") and callable(obj.dict):
+
+        try:
+
+            return to_plain_data(obj.dict())
+
+        except Exception:
+            pass
+
+    if hasattr(obj, "__dict__"):
+
+        return {
+            key: to_plain_data(value)
+            for key, value in vars(obj).items()
+            if not key.startswith("_")
+        }
+
+    return str(obj)
+
+
+# =====================================================
+# 7. VALIDATE SERVER URL
+# =====================================================
+
+def validate_server_url(url):
+
+    parsed = urlparse(url)
+
+    if parsed.scheme not in ("http", "https"):
+
+        raise ValueError(
+            "Server URL must start with http:// or https://"
+        )
+
+    if not parsed.netloc:
+
+        raise ValueError("Invalid server URL.")
+
+    return True
+
+
+# =====================================================
+# 8. HEALTH CHECK
+# =====================================================
+
+async def check_server_health(server_url):
 
     async with httpx.AsyncClient(
         timeout=30,
@@ -89,7 +314,7 @@ async def check_server_health():
     ) as http_client:
 
         response = await http_client.get(
-            HEALTH_URL
+            server_url + "/health"
         )
 
         response.raise_for_status()
@@ -98,10 +323,10 @@ async def check_server_health():
 
 
 # =====================================================
-# 5. AGENT DISCOVERY
+# 9. AGENT DISCOVERY
 # =====================================================
 
-async def discover_agent():
+async def discover_agent(server_url):
 
     async with httpx.AsyncClient(
         timeout=30,
@@ -110,7 +335,7 @@ async def discover_agent():
 
         resolver = A2ACardResolver(
             httpx_client=http_client,
-            base_url=SERVER_URL,
+            base_url=server_url,
         )
 
         card = await resolver.get_agent_card()
@@ -119,82 +344,78 @@ async def discover_agent():
 
 
 # =====================================================
-# 6. GENERIC A2A RESPONSE EXTRACTION
+# 10. EXTRACT AGENT INFORMATION
 # =====================================================
 
-def extract_text_from_response(response):
+def get_agent_information(card):
 
-    """
-    Extract text from A2A response models.
-
-    Handles nested task artifacts, message parts
-    and status messages.
-    """
-
-    if hasattr(response, "model_dump"):
-
-        data = response.model_dump(
-            mode="json",
-            exclude_none=True,
-        )
-
-    elif isinstance(response, dict):
-
-        data = response
-
-    else:
-
-        return str(response)
-
-    collected = []
-
-    def walk(value):
-
-        if isinstance(value, dict):
-
-            # A2A text part
-            if (
-                isinstance(value.get("text"), str)
-                and value.get("text").strip()
-            ):
-
-                collected.append(
-                    value["text"].strip()
-                )
-
-            for key, item in value.items():
-
-                if key != "text":
-                    walk(item)
-
-        elif isinstance(value, list):
-
-            for item in value:
-                walk(item)
-
-    walk(data)
-
-    # Remove duplicate text entries
-    unique_text = list(dict.fromkeys(collected))
-
-    if unique_text:
-
-        return "\n\n".join(unique_text)
-
-    return json.dumps(
-        data,
-        indent=2,
-        ensure_ascii=False,
+    name = safe_value(
+        card,
+        "name",
+        "Unknown Agent",
     )
 
+    description = safe_value(
+        card,
+        "description",
+        "No description available.",
+    )
+
+    version = safe_value(
+        card,
+        "version",
+        "Unknown",
+    )
+
+    capabilities = safe_value(
+        card,
+        "capabilities",
+        {},
+    )
+
+    skills = safe_value(
+        card,
+        "skills",
+        [],
+    )
+
+    interfaces = safe_value(
+        card,
+        "supported_interfaces",
+        [],
+    )
+
+    input_modes = safe_value(
+        card,
+        "default_input_modes",
+        [],
+    )
+
+    output_modes = safe_value(
+        card,
+        "default_output_modes",
+        [],
+    )
+
+    return {
+        "name": name,
+        "description": description,
+        "version": version,
+        "capabilities": to_plain_data(capabilities) or {},
+        "skills": skills or [],
+        "interfaces": interfaces or [],
+        "input_modes": input_modes or [],
+        "output_modes": output_modes or [],
+    }
+
 
 # =====================================================
-# 7. GET JSON-RPC ENDPOINT
+# 11. GET JSON-RPC ENDPOINT
 # =====================================================
 
 def get_jsonrpc_url(card):
 
-    interfaces = getattr(
+    interfaces = safe_value(
         card,
         "supported_interfaces",
         [],
@@ -202,35 +423,41 @@ def get_jsonrpc_url(card):
 
     for interface in interfaces:
 
-        if (
-            interface.protocol_binding.upper()
-            == "JSONRPC"
-        ):
+        protocol = safe_value(
+            interface,
+            "protocol_binding",
+            "",
+        )
 
-            return interface.url.rstrip("/")
+        if str(protocol).upper() == "JSONRPC":
+
+            endpoint = safe_value(
+                interface,
+                "url",
+                "",
+            )
+
+            if endpoint:
+                return endpoint.rstrip("/")
 
     raise ValueError(
-        "Agent Card does not advertise a JSON-RPC interface."
+        "No JSON-RPC interface found in the Agent Card."
     )
 
 
 # =====================================================
-# 8. TEST ADVERTISED ENDPOINT
+# 12. ENDPOINT DIAGNOSTICS
 # =====================================================
 
-async def test_advertised_endpoint(card):
+async def test_jsonrpc_service(card):
 
     endpoint = get_jsonrpc_url(card)
 
-    # The server's health route is at the service root,
-    # not at the JSON-RPC path if a custom path is used.
-    if endpoint == SERVER_URL:
+    parsed = urlparse(endpoint)
 
-        health_url = f"{SERVER_URL}/health"
-
-    else:
-
-        health_url = f"{endpoint}/health"
+    health_url = (
+        f"{parsed.scheme}://{parsed.netloc}/health"
+    )
 
     async with httpx.AsyncClient(
         timeout=30,
@@ -245,19 +472,72 @@ async def test_advertised_endpoint(card):
 
         return {
             "endpoint": endpoint,
+            "health_url": health_url,
             "health": response.json(),
+            "status_code": response.status_code,
         }
 
 
 # =====================================================
-# 9. SEND A2A MESSAGE
+# 13. EXTRACT RESPONSE TEXT
+# =====================================================
+
+def extract_text_from_response(response):
+
+    """
+    Extract text from A2A Task, Message or response events.
+    """
+
+    data = to_plain_data(response)
+
+    collected = []
+
+    def walk(value):
+
+        if isinstance(value, dict):
+
+            text_value = value.get("text")
+
+            if (
+                isinstance(text_value, str)
+                and text_value.strip()
+            ):
+
+                collected.append(
+                    text_value.strip()
+                )
+
+            for key, item in value.items():
+
+                if key != "text":
+                    walk(item)
+
+        elif isinstance(value, list):
+
+            for item in value:
+                walk(item)
+
+    walk(data)
+
+    unique = list(dict.fromkeys(collected))
+
+    if unique:
+
+        return "\n\n".join(unique)
+
+    return json.dumps(
+        data,
+        indent=2,
+        ensure_ascii=False,
+    )
+
+
+# =====================================================
+# 14. SEND A2A MESSAGE
 # =====================================================
 
 async def send_a2a_message(question, card):
 
-    endpoint = get_jsonrpc_url(card)
-
-    # Create HTTP client used by the A2A SDK.
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(120.0),
         follow_redirects=True,
@@ -268,7 +548,6 @@ async def send_a2a_message(question, card):
             httpx_client=http_client,
         )
 
-        # Client uses the URL advertised in Agent Card.
         client = await create_client(
             agent=card,
             client_config=config,
@@ -291,21 +570,24 @@ async def send_a2a_message(question, card):
                 request
             ):
 
-                text = extract_text_from_response(
+                response_text = extract_text_from_response(
                     response
                 )
 
-                if text:
-                    responses.append(text)
+                if response_text:
+
+                    responses.append(response_text)
 
             if not responses:
 
                 return (
-                    "The server responded, but no "
-                    "text content was returned."
+                    "The A2A server did not return "
+                    "a readable text response."
                 )
 
-            return "\n\n".join(responses)
+            return "\n\n".join(
+                dict.fromkeys(responses)
+            )
 
         finally:
 
@@ -313,18 +595,39 @@ async def send_a2a_message(question, card):
 
 
 # =====================================================
-# 10. SIDEBAR
+# 15. SERVER STATUS
 # =====================================================
 
-with st.sidebar:
+st.subheader("🌐 Remote A2A Server Status")
 
-    st.header("⚙️ A2A Server")
+if not SERVER_URL:
 
-    st.write("Configured Server URL")
+    st.warning(
+        "Please configure the A2A Server URL."
+    )
+
+    st.stop()
+
+try:
+
+    validate_server_url(SERVER_URL)
+
+except ValueError as error:
+
+    st.error(str(error))
+
+    st.stop()
+
+
+col1, col2 = st.columns([2, 1])
+
+with col1:
+
+    st.write("**Server URL**")
 
     st.code(SERVER_URL)
 
-    st.divider()
+with col2:
 
     if st.button(
         "Check Server Health",
@@ -334,86 +637,75 @@ with st.sidebar:
         try:
 
             health = asyncio.run(
-                check_server_health()
+                check_server_health(SERVER_URL)
             )
+
+            st.session_state.last_health = health
 
             st.success("Server is online!")
 
-            st.json(health)
-
-        except Exception as e:
+        except Exception as error:
 
             st.error(
-                f"Health check failed: {str(e)}"
+                f"Health check failed: {error}"
             )
 
-    if st.button(
-        "Clear Conversation",
-        use_container_width=True,
-    ):
 
-        st.session_state.conversation = []
+if st.session_state.last_health:
 
-        st.rerun()
+    st.json(
+        st.session_state.last_health
+    )
 
 
 # =====================================================
-# 11. DISCOVER REMOTE AGENT
+# 16. DISCOVER REMOTE AGENT
 # =====================================================
+
+st.divider()
 
 st.subheader("1. Discover Remote Agent")
 
-col1, col2 = st.columns([1, 2])
-
-with col1:
-
-    discover_button = st.button(
-        "🔍 Discover Agent",
-        type="primary",
-        use_container_width=True,
-    )
-
-with col2:
-
-    st.caption(
-        "Fetch the remote Agent Card from Render."
-    )
-
-
-if discover_button:
+if st.button(
+    "🔍 Discover Agent",
+    type="primary",
+    use_container_width=False,
+):
 
     try:
 
         with st.spinner(
-            "Discovering remote agent..."
+            "Connecting to remote A2A agent..."
         ):
 
             card = asyncio.run(
-                discover_agent()
+                discover_agent(SERVER_URL)
             )
 
         st.session_state.agent_card = card
-        st.session_state.agent_discovered = True
 
-        st.success("Agent discovered successfully!")
+        st.success(
+            "Agent discovered successfully!"
+        )
 
-    except Exception as e:
+    except Exception as error:
 
         st.session_state.agent_card = None
-        st.session_state.agent_discovered = False
 
         st.error(
-            f"Agent discovery failed: {str(e)}"
+            f"Agent discovery failed: {error}"
         )
 
 
 # =====================================================
-# 12. DISPLAY AGENT DETAILS
+# 17. REMOTE AGENT INFORMATION
 # =====================================================
 
 card = st.session_state.agent_card
 
 if card:
+
+    info = get_agent_information(card)
 
     st.divider()
 
@@ -423,116 +715,271 @@ if card:
 
     with col1:
 
-        st.write("**Agent Name**")
+        st.markdown("### Agent Details")
 
-        st.success(card.name)
+        st.write(
+            "**Agent Name**"
+        )
 
-        st.write("**Description**")
+        st.success(info["name"])
 
-        st.write(card.description)
+        st.write(
+            "**Description**"
+        )
 
-        st.write("**Version**")
+        st.write(info["description"])
 
-        st.write(card.version)
+        st.write(
+            "**Version**"
+        )
+
+        st.write(info["version"])
 
     with col2:
 
-        st.write("**Agent Capabilities**")
+        st.markdown("### Agent Capabilities")
 
-        st.json(
-            card.capabilities.model_dump(
-                mode="json"
+        capabilities = info["capabilities"]
+
+        if capabilities:
+
+            st.json(capabilities)
+
+        else:
+
+            st.info(
+                "No capabilities published."
             )
-        )
-
-    # Display advertised interfaces
-    st.write("**Supported Interfaces**")
-
-    for interface in card.supported_interfaces:
-
-        st.code(
-            f"{interface.protocol_binding}: "
-            f"{interface.url}"
-        )
-
-    # Display skills
-    st.write("**Available Skills**")
-
-    for skill in card.skills:
-
-        with st.expander(skill.name):
-
-            st.write(skill.description)
-
-            st.write("Tags:", skill.tags)
-
-            st.write("Examples:", skill.examples)
 
 
-# =====================================================
-# 13. ENDPOINT DIAGNOSTICS
-# =====================================================
-
-if card:
+    # =================================================
+    # 18. AGENT SKILLS
+    # =================================================
 
     st.divider()
 
-    st.subheader("3. JSON-RPC Connection Diagnostics")
+    st.subheader("3. Available Agent Skills")
 
-    if st.button(
-        "Test Advertised Endpoint",
-        use_container_width=True,
-    ):
+    if info["skills"]:
 
-        try:
+        for index, skill in enumerate(
+            info["skills"],
+            1,
+        ):
 
-            with st.spinner(
-                "Testing advertised endpoint..."
+            with st.expander(
+                f"Skill {index}: "
+                f"{safe_value(skill, 'name', 'Unnamed Skill')}"
             ):
 
-                result = asyncio.run(
-                    test_advertised_endpoint(card)
+                st.write(
+                    "**Skill ID:**",
+                    safe_value(skill, "id", "N/A")
                 )
 
-            st.success("Advertised endpoint is reachable!")
+                st.write(
+                    "**Description:**",
+                    safe_value(skill, "description", "N/A")
+                )
 
-            st.write(
-                "**JSON-RPC URL:**",
-                result["endpoint"],
+                st.write(
+                    "**Tags:**",
+                    safe_value(skill, "tags", [])
+                )
+
+                st.write(
+                    "**Examples:**",
+                    safe_value(skill, "examples", [])
+                )
+
+    else:
+
+        st.info("No skills registered.")
+
+
+    # =================================================
+    # 19. SUPPORTED INTERFACES
+    # =================================================
+
+    st.divider()
+
+    st.subheader("4. A2A Protocol Interfaces")
+
+    if info["interfaces"]:
+
+        for interface in info["interfaces"]:
+
+            protocol = safe_value(
+                interface,
+                "protocol_binding",
+                "Unknown",
             )
 
-            st.json(result["health"])
-
-        except Exception as e:
-
-            st.error(
-                f"Advertised endpoint test failed: {str(e)}"
+            endpoint = safe_value(
+                interface,
+                "url",
+                "Unknown",
             )
+
+            version = safe_value(
+                interface,
+                "protocol_version",
+                "Unknown",
+            )
+
+            with st.expander(
+                f"Protocol: {protocol}",
+                expanded=True,
+            ):
+
+                st.write(
+                    "**Protocol Binding:**",
+                    protocol,
+                )
+
+                st.write(
+                    "**Protocol Version:**",
+                    version,
+                )
+
+                st.write(
+                    "**Endpoint:**"
+                )
+
+                st.code(endpoint)
+
+    else:
+
+        st.warning(
+            "No supported interfaces found."
+        )
+
+
+    # =================================================
+    # 20. JSON-RPC CONNECTION TEST
+    # =================================================
+
+    st.divider()
+
+    st.subheader("5. JSON-RPC Endpoint Diagnostics")
+
+    try:
+
+        jsonrpc_url = get_jsonrpc_url(card)
+
+        st.write(
+            "**Advertised JSON-RPC URL:**"
+        )
+
+        st.code(jsonrpc_url)
+
+        if jsonrpc_url != SERVER_URL:
 
             st.warning(
-                "Check the URL advertised in the Agent Card "
-                "and the Render deployment."
+                "Advertised JSON-RPC URL differs from "
+                "the configured server URL. Verify it."
             )
 
+        if st.button(
+            "Test Advertised Endpoint",
+            use_container_width=True,
+        ):
 
-# =====================================================
-# 14. CHAT INTERFACE
-# =====================================================
+            try:
 
-st.divider()
+                with st.spinner(
+                    "Testing remote service..."
+                ):
 
-st.subheader("4. Communicate with Remote Agent")
+                    result = asyncio.run(
+                        test_jsonrpc_service(card)
+                    )
 
-if not card:
+                st.success(
+                    "Advertised service is reachable."
+                )
 
-    st.info(
-        "First click Discover Agent to connect to the "
-        "remote A2A agent."
+                st.json(result)
+
+            except Exception as error:
+
+                st.error(
+                    f"Endpoint test failed: {error}"
+                )
+
+    except Exception as error:
+
+        st.error(str(error))
+
+
+    # =================================================
+    # 21. INPUT / OUTPUT MODES
+    # =================================================
+
+    st.divider()
+
+    st.subheader("6. Supported Input / Output")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+
+        st.markdown("**Input Modes**")
+
+        for mode in info["input_modes"]:
+
+            st.success(mode)
+
+    with col2:
+
+        st.markdown("**Output Modes**")
+
+        for mode in info["output_modes"]:
+
+            st.info(mode)
+
+
+    # =================================================
+    # 22. RAW AGENT CARD
+    # =================================================
+
+    st.divider()
+
+    st.subheader("7. Complete Agent Card")
+
+    with st.expander(
+        "View Agent Card JSON"
+    ):
+
+        card_data = to_plain_data(card)
+
+        st.json(card_data)
+
+        st.download_button(
+            "Download Agent Card",
+            data=json.dumps(
+                card_data,
+                indent=4,
+                ensure_ascii=False,
+            ),
+            file_name="pragyanai_agent_card.json",
+            mime="application/json",
+        )
+
+
+    # =================================================
+    # 23. CHAT INTERFACE
+    # =================================================
+
+    st.divider()
+
+    st.subheader("8. Communicate with Remote Agent")
+
+    st.caption(
+        "Send messages to the remote A2A agent."
     )
 
-else:
-
-    # Display conversation history
+    # Render previous conversation
 
     for item in st.session_state.conversation:
 
@@ -540,13 +987,13 @@ else:
 
             st.markdown(item["content"])
 
+
     question = st.chat_input(
         "Enter your message to the remote agent..."
     )
 
     if question:
 
-        # Add user message
         st.session_state.conversation.append({
             "role": "user",
             "content": question,
@@ -573,59 +1020,103 @@ else:
 
                     st.markdown(result)
 
+                    st.session_state.last_response = result
+
                     st.session_state.conversation.append({
                         "role": "assistant",
                         "content": result,
                     })
 
-                except httpx.ConnectError as e:
+                except httpx.ConnectError as error:
 
                     st.error(
-                        "Cannot connect to the JSON-RPC endpoint."
+                        "Cannot connect to the advertised "
+                        "JSON-RPC endpoint."
                     )
 
-                    st.code(str(e))
+                    st.code(str(error))
 
-                    st.info(
-                        "Check whether the Agent Card advertises "
-                        "the correct publicly accessible Render URL."
+                    st.warning(
+                        "Verify the supportedInterfaces URL "
+                        "in the Agent Card and the Render server."
                     )
 
-                except httpx.TimeoutException as e:
+                except httpx.TimeoutException as error:
 
                     st.error(
                         "A2A request timed out."
                     )
 
-                    st.code(str(e))
+                    st.code(str(error))
 
-                except httpx.HTTPStatusError as e:
+                except httpx.HTTPStatusError as error:
 
                     st.error(
-                        f"HTTP error: {e.response.status_code}"
+                        f"HTTP Error: {error.response.status_code}"
                     )
 
                     st.code(
-                        e.response.text[:2000]
+                        error.response.text[:2000]
                     )
 
-                except Exception as e:
+                except Exception as error:
 
                     st.error(
-                        f"A2A communication failed: {str(e)}"
+                        f"A2A communication failed: {error}"
                     )
 
-                    st.exception(e)
+                    st.exception(error)
+
+
+else:
+
+    st.info(
+        "Discover the remote agent to view its information "
+        "and start A2A communication."
+    )
 
 
 # =====================================================
-# 15. FOOTER
+# 24. MONITORING INFORMATION
 # =====================================================
 
 st.divider()
 
-st.caption(
-    "PragyanAI | A2A Remote Agent Client | "
-    "Streamlit + Python + A2A SDK + Render"
-)
+st.subheader("9. Client Monitoring")
 
+col1, col2 = st.columns(2)
+
+with col1:
+
+    st.metric(
+        "Conversation Messages",
+        len(st.session_state.conversation)
+    )
+
+with col2:
+
+    st.write("**Last Client Activity**")
+
+    st.write(
+        datetime.now(timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S UTC"
+        )
+    )
+
+
+# =====================================================
+# 25. FOOTER
+# =====================================================
+
+st.divider()
+
+st.markdown(
+    """
+    <div style="text-align:center; color:gray;">
+        <b>PRAGYANAI</b><br>
+        Agent-to-Agent Communication Platform<br>
+        Streamlit + Python + A2A SDK + Render
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
