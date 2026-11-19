@@ -3,11 +3,12 @@ import streamlit as st
 import requests
 import json
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 
-# ==========================================
+# =====================================================
 # 1. PAGE CONFIGURATION
-# ==========================================
+# =====================================================
 
 st.set_page_config(
     page_title="PragyanAI - A2A Agent Dashboard",
@@ -17,9 +18,9 @@ st.set_page_config(
 )
 
 
-# ==========================================
+# =====================================================
 # 2. CUSTOM CSS
-# ==========================================
+# =====================================================
 
 st.markdown("""
 <style>
@@ -52,13 +53,18 @@ st.markdown("""
     font-weight: bold;
 }
 
+.small-text {
+    font-size: 12px;
+    color: gray;
+}
+
 </style>
 """, unsafe_allow_html=True)
 
 
-# ==========================================
+# =====================================================
 # 3. HEADER
-# ==========================================
+# =====================================================
 
 st.markdown(
     '<div class="main-title">🤖 A2A Agent Dashboard</div>',
@@ -67,7 +73,8 @@ st.markdown(
 
 st.markdown(
     '<div class="subtitle">'
-    'Agent-to-Agent Protocol | Remote Agent Monitoring'
+    'Agent-to-Agent Protocol | Remote Agent Monitoring | '
+    'Agent Discovery | JSON-RPC'
     '</div>',
     unsafe_allow_html=True
 )
@@ -75,17 +82,33 @@ st.markdown(
 st.divider()
 
 
-# ==========================================
+# =====================================================
 # 4. SERVER CONFIGURATION
-# ==========================================
+# =====================================================
 
 DEFAULT_URL = "https://your-a2a-server.onrender.com"
 
 try:
-    SERVER_URL = st.secrets["A2A_SERVER_URL"]
+    SECRET_URL = st.secrets["A2A_SERVER_URL"]
 except Exception:
-    SERVER_URL = DEFAULT_URL
+    SECRET_URL = DEFAULT_URL
 
+if "server_url" not in st.session_state:
+    st.session_state.server_url = SECRET_URL
+
+if "agent_card" not in st.session_state:
+    st.session_state.agent_card = None
+
+if "health_data" not in st.session_state:
+    st.session_state.health_data = None
+
+if "last_checked" not in st.session_state:
+    st.session_state.last_checked = None
+
+
+# =====================================================
+# 5. SIDEBAR
+# =====================================================
 
 with st.sidebar:
 
@@ -93,18 +116,27 @@ with st.sidebar:
 
     SERVER_URL = st.text_input(
         "A2A Server URL",
-        value=SERVER_URL,
+        value=st.session_state.server_url,
         help="Enter the public HTTPS URL of your A2A server"
+    ).strip().rstrip("/")
+
+    st.session_state.server_url = SERVER_URL
+
+    HEALTH_URL = SERVER_URL + "/health"
+
+    CARD_URL = (
+        SERVER_URL
+        + "/.well-known/agent-card.json"
     )
 
-    SERVER_URL = SERVER_URL.strip().rstrip("/")
+    st.caption("Health endpoint")
+    st.code(HEALTH_URL)
 
     st.caption("Agent Card endpoint")
+    st.code(CARD_URL)
 
-    st.code(
-        SERVER_URL + "/.well-known/agent-card.json"
-        if SERVER_URL else "Not configured"
-    )
+    st.caption("JSON-RPC endpoint")
+    st.code("/")
 
     refresh = st.button(
         "🔄 Refresh Agent Status",
@@ -118,44 +150,42 @@ with st.sidebar:
     st.markdown("""
     - Python
     - Streamlit
-    - FastAPI
+    - Starlette / FastAPI
     - A2A Protocol
     - A2A Python SDK
-    - JSON-RPC
+    - JSON-RPC 2.0
+    - HTTPX / Requests
+    - Render Cloud
     """)
 
+    st.divider()
 
-# ==========================================
-# 5. AGENT CARD DISCOVERY
-# ==========================================
-
-@st.cache_data(ttl=30)
-def discover_agent(server_url):
-
-    card_url = (
-        server_url.rstrip("/")
-        + "/.well-known/agent-card.json"
-    )
-
-    response = requests.get(
-        card_url,
-        timeout=30
-    )
-
-    response.raise_for_status()
-
-    return response.json()
+    st.caption("PragyanAI | Agent Monitoring Platform")
 
 
-if refresh:
-    st.cache_data.clear()
+# =====================================================
+# 6. VALIDATE SERVER URL
+# =====================================================
 
+def validate_server_url(url):
 
-# ==========================================
-# 6. CHECK SERVER STATUS
-# ==========================================
+    parsed = urlparse(url)
 
-st.subheader("🌐 Remote A2A Server Status")
+    if parsed.scheme not in ["http", "https"]:
+        raise ValueError(
+            "Server URL must begin with http:// or https://"
+        )
+
+    if not parsed.netloc:
+        raise ValueError("Invalid server URL.")
+
+    if parsed.username or parsed.password:
+        raise ValueError(
+            "Credentials should not be embedded in the URL."
+        )
+
+    return True
+
 
 if not SERVER_URL:
 
@@ -163,75 +193,289 @@ if not SERVER_URL:
 
     st.stop()
 
+try:
+
+    validate_server_url(SERVER_URL)
+
+except ValueError as error:
+
+    st.error(str(error))
+
+    st.stop()
+
+
+# =====================================================
+# 7. HTTP SESSION
+# =====================================================
+
+@st.cache_resource
+def get_http_session():
+
+    session = requests.Session()
+
+    session.headers.update({
+        "User-Agent": "PragyanAI-A2A-Dashboard/1.0"
+    })
+
+    return session
+
+
+http = get_http_session()
+
+
+# =====================================================
+# 8. SERVER HEALTH CHECK
+# =====================================================
+
+def check_server_health(server_url):
+
+    url = server_url + "/health"
+
+    response = http.get(
+        url,
+        timeout=(10, 30)
+    )
+
+    response.raise_for_status()
+
+    return response.json()
+
+
+# =====================================================
+# 9. AGENT CARD DISCOVERY
+# =====================================================
+
+@st.cache_data(ttl=30, show_spinner=False)
+def discover_agent(server_url):
+
+    card_url = (
+        server_url
+        + "/.well-known/agent-card.json"
+    )
+
+    response = requests.get(
+        card_url,
+        timeout=(10, 30),
+        headers={
+            "User-Agent": "PragyanAI-A2A-Dashboard/1.0"
+        }
+    )
+
+    response.raise_for_status()
+
+    card = response.json()
+
+    if not isinstance(card, dict):
+        raise ValueError(
+            "Agent Card response is not a valid JSON object."
+        )
+
+    if not card.get("name"):
+        raise ValueError(
+            "Agent Card does not contain an agent name."
+        )
+
+    return card
+
+
+# =====================================================
+# 10. JSON-RPC ENDPOINT VALIDATION
+# =====================================================
+
+def get_jsonrpc_interfaces(agent):
+
+    interfaces = agent.get(
+        "supportedInterfaces",
+        []
+    )
+
+    return [
+        interface
+        for interface in interfaces
+        if interface.get(
+            "protocolBinding", ""
+        ).upper() == "JSONRPC"
+    ]
+
+
+def test_advertised_endpoint(interface):
+
+    endpoint = interface.get("url", "").rstrip("/")
+
+    if not endpoint:
+
+        return {
+            "success": False,
+            "message": "JSON-RPC endpoint URL is missing."
+        }
+
+    parsed = urlparse(endpoint)
+
+    if parsed.scheme not in ["http", "https"] or not parsed.netloc:
+
+        return {
+            "success": False,
+            "message": "Invalid advertised endpoint URL."
+        }
+
+    # The health endpoint belongs to the service root.
+    # A custom JSON-RPC path may differ from the root URL.
+
+    health_url = (
+        f"{parsed.scheme}://{parsed.netloc}/health"
+    )
+
+    try:
+
+        response = requests.get(
+            health_url,
+            timeout=(10, 30)
+        )
+
+        response.raise_for_status()
+
+        return {
+            "success": True,
+            "endpoint": endpoint,
+            "health_url": health_url,
+            "status_code": response.status_code,
+            "health_data": response.json()
+        }
+
+    except requests.exceptions.RequestException as error:
+
+        return {
+            "success": False,
+            "endpoint": endpoint,
+            "health_url": health_url,
+            "message": str(error)
+        }
+
+
+# =====================================================
+# 11. REFRESH CACHE
+# =====================================================
+
+if refresh:
+
+    discover_agent.clear()
+
+    st.session_state.agent_card = None
+    st.session_state.health_data = None
+
+    st.rerun()
+
+
+# =====================================================
+# 12. SERVER STATUS
+# =====================================================
+
+st.subheader("🌐 Remote A2A Server Status")
+
+server_online = False
+agent = None
+health = None
+
+col1, col2 = st.columns([1, 2])
+
+with col1:
+
+    st.write("**Configured Server**")
+
+    st.code(SERVER_URL)
+
+with col2:
+
+    st.write("**Current Monitoring Time**")
+
+    st.write(
+        datetime.now(timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S UTC"
+        )
+    )
+
+
+# =====================================================
+# 13. HEALTH AND DISCOVERY
+# =====================================================
 
 try:
 
-    with st.spinner("Connecting to A2A Server..."):
+    with st.spinner("Checking A2A server..."):
 
-        agent = discover_agent(SERVER_URL)
+        health = check_server_health(SERVER_URL)
 
-    server_online = True
+    st.session_state.health_data = health
 
-    st.success("🟢 A2A Agent Server is Online")
+    server_online = (
+        health.get("status", "").lower() == "healthy"
+    )
 
 except requests.exceptions.Timeout:
 
-    server_online = False
-    agent = None
-
-    st.error("Connection timeout. Server took too long to respond.")
+    st.error(
+        "Health check timed out. "
+        "Render server may be sleeping or unavailable."
+    )
 
 except requests.exceptions.ConnectionError:
 
-    server_online = False
-    agent = None
-
-    st.error("Unable to connect to the A2A Server.")
+    st.error(
+        "Cannot establish a connection to the Render server."
+    )
 
 except requests.exceptions.HTTPError as error:
 
-    server_online = False
-    agent = None
-
-    st.error(f"HTTP Error: {error}")
+    st.error(
+        f"Health endpoint returned HTTP error: {error}"
+    )
 
 except Exception as error:
 
-    server_online = False
-    agent = None
+    st.error(
+        f"Health check error: {error}"
+    )
 
-    st.error(f"Unexpected error: {error}")
 
-
-# ==========================================
-# 7. AGENT OVERVIEW
-# ==========================================
+# =====================================================
+# 14. AGENT CARD DISCOVERY
+# =====================================================
 
 if server_online:
 
-    st.divider()
+    try:
 
-    st.subheader("📊 Agent Overview")
+        with st.spinner("Discovering remote agent..."):
 
-    agent_name = agent.get(
-        "name",
-        "Unknown Agent"
-    )
+            agent = discover_agent(SERVER_URL)
 
-    description = agent.get(
-        "description",
-        "No description available"
-    )
+        st.session_state.agent_card = agent
 
-    version = agent.get(
-        "version",
-        "Unknown"
-    )
+        st.session_state.last_checked = (
+            datetime.now(timezone.utc)
+            .strftime("%Y-%m-%d %H:%M:%S UTC")
+        )
 
-    skills = agent.get(
-        "skills",
-        []
-    )
+    except Exception as error:
+
+        st.error(
+            f"Agent Card discovery failed: {error}"
+        )
+
+        agent = None
+
+
+# =====================================================
+# 15. SERVER METRICS
+# =====================================================
+
+if server_online:
+
+    st.success("🟢 A2A Agent Server is Online")
+
+    agent = agent or {}
+
+    skills = agent.get("skills", [])
 
     capabilities = agent.get(
         "capabilities",
@@ -243,42 +487,43 @@ if server_online:
         []
     )
 
-    # Metrics
-
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
+
         st.metric(
             "Server Status",
             "ONLINE"
         )
 
     with col2:
+
         st.metric(
             "Agent Skills",
             len(skills)
         )
 
     with col3:
+
         st.metric(
             "Agent Version",
-            version
+            agent.get("version", "Unknown")
         )
 
     with col4:
+
         st.metric(
             "Streaming",
-            "Enabled" if capabilities.get(
-                "streaming", False
-            ) else "Disabled"
+            "Enabled"
+            if capabilities.get("streaming", False)
+            else "Disabled"
         )
 
-
-    # ======================================
-    # 8. AGENT INFORMATION
-    # ======================================
-
     st.divider()
+
+    # =================================================
+    # 16. AGENT INFORMATION
+    # =================================================
 
     st.subheader("🤖 Agent Information")
 
@@ -288,21 +533,32 @@ if server_online:
 
         st.markdown("### Agent Details")
 
-        st.write("**Name:**", agent_name)
+        st.write(
+            "**Name:**",
+            agent.get("name", "Unknown Agent")
+        )
 
         st.write(
             "**Description:**",
-            description
+            agent.get(
+                "description",
+                "No description available"
+            )
         )
 
         st.write(
             "**Version:**",
-            version
+            agent.get("version", "Unknown")
         )
 
         st.write(
-            "**URL:**",
+            "**Server URL:**",
             SERVER_URL
+        )
+
+        st.write(
+            "**Protocol Version:**",
+            agent.get("protocolVersion", "Unknown")
         )
 
     with col2:
@@ -318,9 +574,9 @@ if server_online:
             st.info("No capabilities published.")
 
 
-    # ======================================
-    # 9. AGENT SKILLS
-    # ======================================
+    # =================================================
+    # 17. AGENT SKILLS
+    # =================================================
 
     st.divider()
 
@@ -331,8 +587,9 @@ if server_online:
         for index, skill in enumerate(skills, 1):
 
             with st.expander(
-                f"Skill {index}: {skill.get('name', 'Unnamed')}",
-                expanded=True
+                f"Skill {index}: "
+                f"{skill.get('name', 'Unnamed')}",
+                expanded=False
             ):
 
                 st.write(
@@ -355,23 +612,36 @@ if server_online:
                     ", ".join(skill.get("tags", []))
                 )
 
-                examples = skill.get("examples", [])
+                examples = skill.get(
+                    "examples", []
+                )
 
                 if examples:
 
                     st.write("**Examples:**")
 
                     for example in examples:
+
                         st.write(f"- {example}")
+
+                st.write(
+                    "**Input Modes:**",
+                    skill.get("inputModes", [])
+                )
+
+                st.write(
+                    "**Output Modes:**",
+                    skill.get("outputModes", [])
+                )
 
     else:
 
         st.info("No skills registered.")
 
 
-    # ======================================
-    # 10. PROTOCOL INFORMATION
-    # ======================================
+    # =================================================
+    # 18. A2A PROTOCOL INFORMATION
+    # =================================================
 
     st.divider()
 
@@ -379,43 +649,126 @@ if server_online:
 
     if interfaces:
 
-        for interface in interfaces:
+        for index, interface in enumerate(
+            interfaces, 1
+        ):
 
-            col1, col2 = st.columns(2)
+            with st.expander(
+                f"Interface {index}: "
+                f"{interface.get('protocolBinding', 'Unknown')}",
+                expanded=True
+            ):
 
-            with col1:
+                col1, col2 = st.columns(2)
 
-                st.write(
-                    "**Protocol Binding:**",
-                    interface.get(
-                        "protocolBinding", "N/A"
+                with col1:
+
+                    st.write(
+                        "**Protocol Binding:**",
+                        interface.get(
+                            "protocolBinding", "N/A"
+                        )
                     )
-                )
 
-                st.write(
-                    "**Protocol Version:**",
-                    interface.get(
-                        "protocolVersion", "N/A"
+                    st.write(
+                        "**Protocol Version:**",
+                        interface.get(
+                            "protocolVersion", "N/A"
+                        )
                     )
-                )
 
-            with col2:
+                with col2:
 
-                st.write(
-                    "**Endpoint:**",
-                    interface.get("url", "N/A")
-                )
+                    st.write(
+                        "**Endpoint:**"
+                    )
+
+                    st.code(
+                        interface.get("url", "N/A")
+                    )
 
     else:
 
-        st.info(
+        st.warning(
             "No supported interfaces found in Agent Card."
         )
 
 
-    # ======================================
-    # 11. INPUT AND OUTPUT MODES
-    # ======================================
+    # =================================================
+    # 19. JSON-RPC ENDPOINT DIAGNOSTICS
+    # =================================================
+
+    st.divider()
+
+    st.subheader("🔌 JSON-RPC Endpoint Diagnostics")
+
+    jsonrpc_interfaces = get_jsonrpc_interfaces(
+        agent
+    )
+
+    if jsonrpc_interfaces:
+
+        for interface in jsonrpc_interfaces:
+
+            endpoint = interface.get("url", "")
+
+            st.write(
+                "**Advertised JSON-RPC URL:**"
+            )
+
+            st.code(endpoint)
+
+            if endpoint.rstrip("/") != SERVER_URL.rstrip("/"):
+
+                st.warning(
+                    "The advertised JSON-RPC URL differs "
+                    "from the configured server URL. "
+                    "Verify that it is intentional and reachable."
+                )
+
+            if st.button(
+                "Test Advertised Endpoint",
+                key=f"test_endpoint_{endpoint}"
+            ):
+
+                with st.spinner(
+                    "Testing advertised service..."
+                ):
+
+                    result = test_advertised_endpoint(
+                        interface
+                    )
+
+                if result["success"]:
+
+                    st.success(
+                        "Advertised endpoint service is reachable."
+                    )
+
+                    st.json(result["health_data"])
+
+                else:
+
+                    st.error(
+                        "Advertised endpoint health check failed."
+                    )
+
+                    st.code(
+                        result.get("message", "Unknown error")
+                    )
+
+    else:
+
+        st.error(
+            "No JSON-RPC interface found. "
+            "The client cannot use JSON-RPC until the Agent "
+            "Card advertises a supported interface."
+        )
+
+
+    # =================================================
+    # 20. INPUT AND OUTPUT MODES
+    # =================================================
 
     st.divider()
 
@@ -444,9 +797,9 @@ if server_online:
             st.info(mode)
 
 
-    # ======================================
-    # 12. RAW AGENT CARD
-    # ======================================
+    # =================================================
+    # 21. COMPLETE AGENT CARD
+    # =================================================
 
     st.divider()
 
@@ -470,9 +823,9 @@ if server_online:
         )
 
 
-    # ======================================
-    # 13. SERVER INFORMATION
-    # ======================================
+    # =================================================
+    # 22. MONITORING INFORMATION
+    # =================================================
 
     st.divider()
 
@@ -483,17 +836,13 @@ if server_online:
     with col1:
 
         st.write(
-            "**Last Checked:**",
-            datetime.now(
-                timezone.utc
-            ).strftime("%Y-%m-%d %H:%M:%S UTC")
+            "**Last Successful Discovery:**",
+            st.session_state.last_checked or "N/A"
         )
 
     with col2:
 
-        st.write(
-            "**Agent Card Endpoint:**"
-        )
+        st.write("**Agent Card Endpoint**")
 
         st.code(
             SERVER_URL
@@ -503,16 +852,18 @@ if server_online:
 
 else:
 
+    st.error("🔴 A2A Server is Unavailable")
+
     st.warning(
         "Agent information is unavailable. "
-        "Check whether the A2A backend is running "
-        "and the Agent Card endpoint is accessible."
+        "Check Render deployment, server health and "
+        "the configured URL."
     )
 
 
-# ==========================================
-# 14. FOOTER
-# ==========================================
+# =====================================================
+# 23. FOOTER
+# =====================================================
 
 st.divider()
 
@@ -526,3 +877,4 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
