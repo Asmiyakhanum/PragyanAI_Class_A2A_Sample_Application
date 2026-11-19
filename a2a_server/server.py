@@ -1,41 +1,31 @@
 
-# server.py
-
 import os
 import uvicorn
 
 from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 
-from a2a.server.request_handlers import (
-    DefaultRequestHandler
-)
-
+from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import (
     create_agent_card_routes,
-    create_jsonrpc_routes
+    create_jsonrpc_routes,
 )
-
-from a2a.server.tasks import (
-    InMemoryTaskStore
-)
+from a2a.server.tasks import InMemoryTaskStore
 
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
     AgentInterface,
-    AgentSkill
+    AgentSkill,
 )
 
-from agent_executor import (
-    HelloWorldAgentExecutor
-)
+from agent_executor import HelloWorldAgentExecutor
 
 
-# ==========================================
+# --------------------------------------------------
 # 1. SERVER CONFIGURATION
-# ==========================================
-
-HOST = "0.0.0.0"
+# --------------------------------------------------
 
 PORT = int(os.environ.get("PORT", "8001"))
 
@@ -45,170 +35,153 @@ PUBLIC_URL = os.environ.get(
 ).rstrip("/")
 
 
-# ==========================================
+# --------------------------------------------------
 # 2. DEFINE AGENT SKILL
-# ==========================================
+# --------------------------------------------------
 
 hello_skill = AgentSkill(
-
     id="hello_world",
-
-    name="Hello World",
-
+    name="Hello World Agent",
     description=(
-        "Accepts user messages and returns "
-        "intelligent responses."
+        "An A2A agent that receives user messages "
+        "and returns intelligent responses."
     ),
-
     tags=[
         "hello",
         "greeting",
-        "conversation",
-        "a2a"
+        "assistant",
+        "A2A",
     ],
-
     examples=[
-        "Hello A2A Agent",
-        "Explain Agent-to-Agent Protocol",
-        "How do AI agents communicate?"
+        "Hello",
+        "Introduce yourself",
+        "What can you do?",
+        "Explain Agent-to-Agent communication",
     ],
-
-    input_modes=[
-        "text/plain"
-    ],
-
-    output_modes=[
-        "text/plain"
-    ]
 )
 
 
-# ==========================================
-# 3. CREATE AGENT CARD
-# ==========================================
+# --------------------------------------------------
+# 3. DEFINE AGENT CARD
+# --------------------------------------------------
 
 agent_card = AgentCard(
-
-    name="PragyanAI Remote A2A Agent",
-
+    name="PragyanAI Hello World Agent",
     description=(
-        "A remote AI agent built using "
-        "Python, A2A SDK and Streamlit."
+        "A demonstration A2A agent hosted on Render. "
+        "It receives messages from external A2A clients "
+        "and returns responses."
     ),
-
     version="1.0.0",
 
     default_input_modes=[
-        "text/plain"
+        "text/plain",
     ],
 
     default_output_modes=[
-        "text/plain"
+        "text/plain",
     ],
 
     capabilities=AgentCapabilities(
-
         streaming=True,
-
-        push_notifications=False
-
+        push_notifications=False,
     ),
 
     supported_interfaces=[
-
         AgentInterface(
-
             protocol_binding="JSONRPC",
-
             url=PUBLIC_URL,
-
-            protocol_version="1.0"
-
+            protocol_version="1.0",
         )
-
     ],
 
     skills=[
-        hello_skill
-    ]
+        hello_skill,
+    ],
 )
 
 
-# ==========================================
-# 4. CREATE A2A REQUEST HANDLER
-# ==========================================
+# --------------------------------------------------
+# 4. INITIALIZE AGENT EXECUTOR
+# --------------------------------------------------
+
+agent_executor = HelloWorldAgentExecutor()
+
+
+# --------------------------------------------------
+# 5. INITIALIZE TASK STORE
+# --------------------------------------------------
+
+task_store = InMemoryTaskStore()
+
+
+# --------------------------------------------------
+# 6. INITIALIZE REQUEST HANDLER
+# --------------------------------------------------
 
 request_handler = DefaultRequestHandler(
-
-    agent_executor=HelloWorldAgentExecutor(),
-
-    task_store=InMemoryTaskStore(),
-
-    agent_card=agent_card
-
+    agent_executor=agent_executor,
+    task_store=task_store,
+    agent_card=agent_card,
 )
 
 
-# ==========================================
-# 5. CREATE A2A ROUTES
-# ==========================================
+# --------------------------------------------------
+# 7. HEALTH CHECK ENDPOINT
+# --------------------------------------------------
 
-routes = []
-
-# Agent Card discovery
-routes.extend(
-    create_agent_card_routes(agent_card)
-)
-
-# A2A JSON-RPC endpoint
-routes.extend(
-    create_jsonrpc_routes(
-        request_handler,
-        "/"
-    )
-)
-
-
-# ==========================================
-# 6. CREATE APPLICATION
-# ==========================================
-
-app = Starlette(
-    routes=routes
-)
-
-
-# ==========================================
-# 7. HEALTH CHECK
-# ==========================================
-
-@app.route("/health", methods=["GET"])
 async def health(request):
-
-    from starlette.responses import JSONResponse
 
     return JSONResponse({
         "status": "healthy",
+        "service": "PragyanAI A2A Server",
         "agent": agent_card.name,
-        "version": agent_card.version
+        "version": agent_card.version,
+        "public_url": PUBLIC_URL,
     })
 
 
-# ==========================================
-# 8. START SERVER
-# ==========================================
+# --------------------------------------------------
+# 8. REGISTER ROUTES
+# --------------------------------------------------
+
+routes = [
+
+    # Health check
+    Route(
+        "/health",
+        endpoint=health,
+        methods=["GET"],
+    ),
+
+    # A2A Agent Card discovery
+    *create_agent_card_routes(agent_card),
+
+    # A2A JSON-RPC communication
+    *create_jsonrpc_routes(
+        request_handler,
+        "/",
+    ),
+]
+
+
+# --------------------------------------------------
+# 9. CREATE STARLETTE APPLICATION
+# --------------------------------------------------
+
+app = Starlette(
+    routes=routes,
+)
+
+
+# --------------------------------------------------
+# 10. RUN SERVER LOCALLY
+# --------------------------------------------------
 
 if __name__ == "__main__":
 
-    print("Starting PragyanAI A2A Server...")
-
-    print("Agent:", agent_card.name)
-
-    print("Agent Card:", PUBLIC_URL +
-          "/.well-known/agent-card.json")
-
     uvicorn.run(
         app,
-        host=HOST,
-        port=PORT
+        host="0.0.0.0",
+        port=PORT,
     )
